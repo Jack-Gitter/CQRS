@@ -11,6 +11,11 @@ import { SeatMapProjector } from './projectors/seat-map.projector';
  * Routes each CDC event to the projectors interested in its source table and
  * applies them in ONE read-DB transaction, so a single WAL change either
  * fully lands in all read models or not at all.
+ *
+ * Events for different tables arrive on different Kafka topics, so there is no
+ * ordering guarantee between an airplane change and a seat change. Every
+ * projector therefore tolerates either order (counts are recomputed from
+ * seat_map, prices are fixed up whichever side arrives last).
  */
 @Injectable()
 export class ProjectionService {

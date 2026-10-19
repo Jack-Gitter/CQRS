@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { READ_DB } from '../database/database.module';
-import { CdcController } from './cdc.controller';
+import { CdcConsumer } from './cdc.consumer';
 import { AirplaneSummaryEntity } from './entities/airplane-summary.entity';
 import { BookingActivityEntity } from './entities/booking-activity.entity';
 import { SeatMapEntity } from './entities/seat-map.entity';
@@ -12,7 +12,6 @@ import { SeatMapProjector } from './projectors/seat-map.projector';
 
 @Module({
   imports: [TypeOrmModule.forFeature([AirplaneSummaryEntity, SeatMapEntity, BookingActivityEntity], READ_DB)],
-  controllers: [CdcController],
-  providers: [ProjectionService, AirplaneSummaryProjector, SeatMapProjector, BookingActivityProjector],
+  providers: [ProjectionService, CdcConsumer, AirplaneSummaryProjector, SeatMapProjector, BookingActivityProjector],
 })
 export class ProjectionModule {}

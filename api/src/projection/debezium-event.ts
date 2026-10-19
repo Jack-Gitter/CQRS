@@ -1,5 +1,5 @@
 /**
- * Shape of the JSON body Debezium Server's HTTP sink POSTs for each change
+ * Shape of each Kafka message value Debezium Server publishes
  * (debezium.format.value=json, schemas disabled).
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
