@@ -1,0 +1,90 @@
+# One-command CQRS demo:
+#   docker compose up --build
+#
+#   write-db  (Postgres, wal_level=logical)  <-- NestJS commands (TypeORM, pessimistic locks)
+#   debezium  (Debezium Server)              <-- tails write-db WAL via pgoutput
+#   api       (NestJS)  POST /internal/cdc   <-- Debezium HTTP sink delivers change events
+#   read-db   (Postgres)                     <-- projectors upsert denormalized read models
+services:
+  write-db:
+    image: postgres:17
+    container_name: cqrs-write-db
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: airline_write
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./db/write:/docker-entrypoint-initdb.d:ro
+      - write-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d airline_write"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  read-db:
+    image: postgres:17
+    container_name: cqrs-read-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: airline_read
+    ports:
+      - "5434:5432"
+    volumes:
+      - ./db/read:/docker-entrypoint-initdb.d:ro
+      - read-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d airline_read"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: ./api
+    container_name: cqrs-api
+    environment:
+      PORT: "3000"
+      WRITE_DB_URL: postgres://postgres:postgres@write-db:5432/airline_write
+      READ_DB_URL: postgres://postgres:postgres@read-db:5432/airline_read
+    ports:
+      - "3000:3000"
+    depends_on:
+      write-db:
+        condition: service_healthy
+      read-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  debezium:
+    image: quay.io/debezium/server:3.1
+    container_name: cqrs-debezium
+    volumes:
+      - ./debezium/application.properties:/debezium/config/application.properties:ro
+      - debezium-data:/debezium/data
+    ports:
+      - "8089:8080" # http://localhost:8089/q/health
+    depends_on:
+      write-db:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+volumes:
+  write-db-data:
+  read-db-data:
+  debezium-data:
