@@ -1,9 +1,9 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { WRITE_DB } from '../../database/database.module';
 import { Airplane } from '../domain/airplane';
-import { AIRPLANE_REPOSITORY, AirplaneRepository } from './airplane.repository';
+import { AirplaneRepository } from '../infrastructure/airplane.repository';
 import { CommandResult } from './commands/commands';
 
 /**
@@ -17,7 +17,7 @@ export class AirplaneUnitOfWork {
 
   constructor(
     @InjectDataSource(WRITE_DB) private readonly dataSource: DataSource,
-    @Inject(AIRPLANE_REPOSITORY) private readonly airplanes: AirplaneRepository,
+    private readonly airplanes: AirplaneRepository,
   ) {}
 
   async mutate(airplaneId: string, action: (airplane: Airplane) => void): Promise<CommandResult> {
@@ -34,11 +34,10 @@ export class AirplaneUnitOfWork {
     });
   }
 
-  async create(factory: (repo: AirplaneRepository) => Airplane): Promise<CommandResult> {
+  async create(airplane: Airplane): Promise<CommandResult> {
     return this.dataSource.transaction(async (manager) => {
-      const airplane = factory(this.airplanes);
       await this.airplanes.insert(manager, airplane);
-      this.logger.log(`airplane ${airplane.tailNumber} created with ${airplane.allSeats.length} seats`);
+      this.logger.log(`airplane ${airplane.tailNumber} created with ${airplane.seats.length} seats`);
       return { airplaneId: airplane.id, version: airplane.version };
     });
   }

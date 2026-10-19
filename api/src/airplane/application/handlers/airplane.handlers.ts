@@ -16,14 +16,12 @@ export class CreateAirplaneHandler implements ICommandHandler<CreateAirplaneComm
   constructor(private readonly uow: AirplaneUnitOfWork) {}
 
   execute(cmd: CreateAirplaneCommand): Promise<CommandResult> {
-    return this.uow.create((repo) =>
+    return this.uow.create(
       Airplane.create({
-        id: repo.nextId(),
         tailNumber: cmd.tailNumber,
         model: cmd.model,
         baseTicketPrice: cmd.baseTicketPrice,
         layout: cmd.layout,
-        seatIdFactory: () => repo.nextId(),
       }),
     );
   }

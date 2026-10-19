@@ -4,19 +4,14 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { WRITE_DB } from '../database/database.module';
 import { AirplaneCommandController } from './api/airplane-command.controller';
 import { AirplaneUnitOfWork } from './application/airplane-unit-of-work';
-import { AIRPLANE_REPOSITORY } from './application/airplane.repository';
 import { COMMAND_HANDLERS } from './application/handlers/airplane.handlers';
-import { AirplaneEntity } from './infrastructure/airplane.entity';
-import { SeatEntity } from './infrastructure/seat.entity';
-import { TypeOrmAirplaneRepository } from './infrastructure/typeorm-airplane.repository';
+import { Airplane } from './domain/airplane';
+import { Seat } from './domain/seat';
+import { AirplaneRepository } from './infrastructure/airplane.repository';
 
 @Module({
-  imports: [CqrsModule, TypeOrmModule.forFeature([AirplaneEntity, SeatEntity], WRITE_DB)],
+  imports: [CqrsModule, TypeOrmModule.forFeature([Airplane, Seat], WRITE_DB)],
   controllers: [AirplaneCommandController],
-  providers: [
-    AirplaneUnitOfWork,
-    { provide: AIRPLANE_REPOSITORY, useClass: TypeOrmAirplaneRepository },
-    ...COMMAND_HANDLERS,
-  ],
+  providers: [AirplaneUnitOfWork, AirplaneRepository, ...COMMAND_HANDLERS],
 })
 export class AirplaneModule {}

@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { AirplaneEntity } from '../airplane/infrastructure/airplane.entity';
-import { SeatEntity } from '../airplane/infrastructure/seat.entity';
+import { Airplane } from '../airplane/domain/airplane';
+import { Seat } from '../airplane/domain/seat';
 import { AirplaneSummaryEntity } from '../projection/entities/airplane-summary.entity';
 import { BookingActivityEntity } from '../projection/entities/booking-activity.entity';
 import { SeatMapEntity } from '../projection/entities/seat-map.entity';
@@ -21,7 +21,7 @@ export const READ_DB = 'read';
       name: WRITE_DB,
       type: 'postgres',
       url: process.env.WRITE_DB_URL ?? 'postgres://postgres:postgres@localhost:5433/airline_write',
-      entities: [AirplaneEntity, SeatEntity],
+      entities: [Airplane, Seat],
       synchronize: false,
       logging: ['error'],
       retryAttempts: 20,

@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import { Column, CreateDateColumn, Entity, OneToMany, PrimaryColumn, UpdateDateColumn } from 'typeorm';
+import { NumericTransformer } from '../../common/numeric.transformer';
 import {
   AirplaneGroundedError,
   AirplaneHasBookingsError,
@@ -23,9 +26,12 @@ const SEAT_LETTERS = 'ABCDEFGHJK'; // airlines skip "I"
 const MAX_PRICE_INCREASE_FACTOR = 1.5; // a single fare change may not raise the price by more than 50%
 
 /**
- * Aggregate root. Everything that touches seats goes through here, and the
- * repository always loads the whole aggregate under a pessimistic lock before
- * any of these methods run, so the invariants below are enforced serially.
+ * Aggregate root AND TypeORM entity ("rich entity" style).
+ *
+ * Identity columns are readonly, state that has invariants is private and only
+ * changed through the methods below. The repository loads the whole aggregate
+ * (airplane + seats) under a pessimistic lock before any method runs, and
+ * TypeORM's save() diffs the graph so only rows that actually changed are written.
  *
  * Invariants:
  *  - a seat can only be booked once
@@ -34,27 +40,51 @@ const MAX_PRICE_INCREASE_FACTOR = 1.5; // a single fare change may not raise the
  *  - an airplane with booked seats cannot be grounded
  *  - base ticket price is positive and cannot jump by more than 50% in one change
  */
+@Entity({ name: 'airplanes' })
 export class Airplane {
-  private readonly changedSeats = new Set<string>();
+  @PrimaryColumn('uuid')
+  readonly id: string;
 
-  private constructor(
-    readonly id: string,
-    readonly tailNumber: string,
-    readonly model: string,
-    private _baseTicketPrice: number,
-    private _status: AirplaneStatus,
-    private readonly seats: Map<string, Seat>,
-    private _version: number,
-  ) {}
+  @Column({ name: 'tail_number', type: 'text', unique: true })
+  readonly tailNumber: string;
 
-  static create(input: {
-    id: string;
-    tailNumber: string;
-    model: string;
-    baseTicketPrice: number;
-    layout: SeatLayout;
-    seatIdFactory: () => string;
-  }): Airplane {
+  @Column({ type: 'text' })
+  readonly model: string;
+
+  @Column({ name: 'base_ticket_price', type: 'numeric', precision: 10, scale: 2, transformer: NumericTransformer })
+  private _baseTicketPrice: number;
+
+  @Column({ name: 'status', type: 'text' })
+  private _status: AirplaneStatus;
+
+  /** Bumped by the repository on every save; read models expose it as writeVersion. */
+  @Column({ type: 'integer', default: 0 })
+  version: number;
+
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
+  readonly createdAt: Date;
+
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
+  readonly updatedAt: Date;
+
+  /** Always loaded together with the root. Mutate seats through the methods below, not directly. */
+  @OneToMany(() => Seat, (seat) => seat.airplane, { cascade: ['insert', 'update'] })
+  readonly seats: Seat[];
+
+  /** TypeORM instantiates with no arguments and then assigns columns; the factory passes props. */
+  private constructor(props?: { id: string; tailNumber: string; model: string; baseTicketPrice: number; seats: Seat[] }) {
+    if (props) {
+      this.id = props.id;
+      this.tailNumber = props.tailNumber;
+      this.model = props.model;
+      this._baseTicketPrice = props.baseTicketPrice;
+      this._status = AirplaneStatus.ACTIVE;
+      this.version = 0;
+      this.seats = props.seats;
+    }
+  }
+
+  static create(input: { tailNumber: string; model: string; baseTicketPrice: number; layout: SeatLayout }): Airplane {
     const { layout } = input;
     const tailNumber = input.tailNumber.trim().toUpperCase();
 
@@ -77,45 +107,22 @@ export class Airplane {
       throw new InvalidAirplaneError('First class rows must be between 0 and the number of rows');
     }
 
-    const seats = new Map<string, Seat>();
+    const id = randomUUID();
+    const seats: Seat[] = [];
     for (let row = 1; row <= layout.rows; row++) {
       const cabin = row <= layout.firstClassRows ? CabinClass.FIRST : CabinClass.ECONOMY;
       for (let i = 0; i < layout.seatsPerRow; i++) {
-        const seatNumber = `${row}${SEAT_LETTERS[i]}`;
-        seats.set(seatNumber, Seat.create(input.seatIdFactory(), seatNumber, cabin));
+        seats.push(Seat.create(randomUUID(), id, `${row}${SEAT_LETTERS[i]}`, cabin));
       }
     }
 
-    return new Airplane(
-      input.id,
+    return new Airplane({
+      id,
       tailNumber,
-      input.model.trim(),
-      round2(input.baseTicketPrice),
-      AirplaneStatus.ACTIVE,
+      model: input.model.trim(),
+      baseTicketPrice: round2(input.baseTicketPrice),
       seats,
-      0,
-    );
-  }
-
-  /** Rehydrate from persistence without running creation validation. */
-  static reconstitute(props: {
-    id: string;
-    tailNumber: string;
-    model: string;
-    baseTicketPrice: number;
-    status: AirplaneStatus;
-    seats: Seat[];
-    version: number;
-  }): Airplane {
-    return new Airplane(
-      props.id,
-      props.tailNumber,
-      props.model,
-      props.baseTicketPrice,
-      props.status,
-      new Map(props.seats.map((s) => [s.seatNumber, s])),
-      props.version,
-    );
+    });
   }
 
   // ---------- behaviour (commands) ----------
@@ -134,14 +141,12 @@ export class Airplane {
     }
 
     seat.book(name, new Date());
-    this.changedSeats.add(seat.seatNumber);
     return seat;
   }
 
   cancelSeat(seatNumber: string): Seat {
     const seat = this.seatOrThrow(seatNumber);
     seat.release();
-    this.changedSeats.add(seat.seatNumber);
     return seat;
   }
 
@@ -159,7 +164,7 @@ export class Airplane {
   }
 
   ground(): void {
-    const booked = this.allSeats.filter((s) => s.isBooked).length;
+    const booked = this.seats.filter((s) => s.isBooked).length;
     if (booked > 0) {
       throw new AirplaneHasBookingsError(this.tailNumber, booked);
     }
@@ -170,7 +175,7 @@ export class Airplane {
     this._status = AirplaneStatus.ACTIVE;
   }
 
-  // ---------- queries on the aggregate (used by the repository) ----------
+  // ---------- read-only accessors ----------
 
   get baseTicketPrice(): number {
     return this._baseTicketPrice;
@@ -180,27 +185,8 @@ export class Airplane {
     return this._status;
   }
 
-  get version(): number {
-    return this._version;
-  }
-
-  get allSeats(): Seat[] {
-    return [...this.seats.values()];
-  }
-
-  /** Seats touched since the aggregate was loaded; the repository persists only these. */
-  get changedSeatList(): Seat[] {
-    return [...this.changedSeats].map((n) => this.seats.get(n)!);
-  }
-
   priceFor(seat: Seat): number {
     return round2(this._baseTicketPrice * seat.priceMultiplier);
-  }
-
-  /** @internal repository calls this after a successful save */
-  markPersisted(version: number): void {
-    this._version = version;
-    this.changedSeats.clear();
   }
 
   // ---------- helpers ----------
@@ -212,7 +198,8 @@ export class Airplane {
   }
 
   private seatOrThrow(seatNumber: string): Seat {
-    const seat = this.seats.get(seatNumber.trim().toUpperCase());
+    const wanted = seatNumber.trim().toUpperCase();
+    const seat = this.seats.find((s) => s.seatNumber === wanted);
     if (!seat) {
       throw new SeatNotFoundError(seatNumber);
     }
@@ -221,7 +208,7 @@ export class Airplane {
 
   private seatHeldBy(passengerName: string): Seat | undefined {
     const needle = passengerName.toLowerCase();
-    return this.allSeats.find((s) => s.isBooked && s.passengerName?.toLowerCase() === needle);
+    return this.seats.find((s) => s.isBooked && s.passengerName?.toLowerCase() === needle);
   }
 }
 

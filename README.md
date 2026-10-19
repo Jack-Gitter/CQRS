@@ -90,8 +90,12 @@ Internal: `POST /internal/cdc` is the Debezium HTTP sink target (not meant for c
 
 `api/src/airplane/domain/`
 
-* `Airplane` is the aggregate root; `Seat` is an entity inside it and is never modified
-  except through the root.
+* `Airplane` is the aggregate root **and** the TypeORM entity for the `airplanes` table
+  ("rich entity" style). `Seat` is an entity inside it, mapped to `seats`, and is never
+  modified except through the root.
+* Identity columns are `readonly`; state that has invariants (`status`, `baseTicketPrice`,
+  seat `status`/`passengerName`) is `private` and exposed through getters, so the only way to
+  change it is a domain method.
 * Invariants enforced by the aggregate:
   * a seat can be booked only once
   * a passenger can hold at most one seat per airplane
@@ -101,9 +105,8 @@ Internal: `POST /internal/cdc` is the Debezium HTTP sink target (not meant for c
 * Invariant violations throw `DomainError` subclasses; `DomainExceptionFilter` maps them
   to 400/404/409/422.
 
-`api/src/airplane/infrastructure/` holds the TypeORM **persistence model**
-(`AirplaneEntity`, `SeatEntity`) and the repository that maps rows ↔ aggregate. The domain
-class has no decorators and no knowledge of TypeORM.
+`Airplane.create()` is the factory: it validates the layout and generates the seat
+entities (`1A`, `1B`, ... with the first N rows as first class).
 
 ### Load → lock → act → save
 
@@ -112,18 +115,24 @@ class has no decorators and no knowledge of TypeORM.
 ```ts
 return this.dataSource.transaction(async (manager) => {
   await manager.query(`SET LOCAL lock_timeout = '5s'`);
-  const airplane = await this.airplanes.findByIdForUpdate(manager, id); // SELECT ... FOR UPDATE
+  const airplane = await this.airplanes.findByIdForUpdate(manager, id); // SELECT ... FOR UPDATE OF airplane
   action(airplane);                                                      // e.g. airplane.bookSeat('1A', 'Ada')
-  await this.airplanes.save(manager, airplane);                          // UPDATE root (version+1) + changed seats
+  await this.airplanes.save(manager, airplane);                          // version += 1; manager.save()
   return { airplaneId: airplane.id, version: airplane.version };
 });
 ```
 
-The repository locks with TypeORM's `lock: { mode: 'pessimistic_write' }`. Concurrent
-commands on the same airplane serialize on that row lock, so the "10 concurrent bookings of
-seat 4F" step in the demo always yields exactly one `200` and nine `409`s. The aggregate
-tracks which seats it touched so only those rows are updated, which keeps the WAL (and thus
-the CDC stream) free of no-op writes.
+`AirplaneRepository.findByIdForUpdate()` joins the seats and locks only the root row with
+`setLock('pessimistic_write', undefined, ['airplane'])`, which emits `FOR UPDATE OF airplane`
+(Postgres refuses to lock the nullable side of an outer join). Concurrent commands on the
+same airplane serialize on that lock, so the "10 concurrent bookings of seat 4F" step in the
+demo always yields exactly one `200` and nine `409`s. Because the row is locked there is no
+optimistic `WHERE version = ...` check on save; `version` is only bumped so the read model can
+expose it as `writeVersion`.
+
+`manager.save(airplane)` diffs the loaded graph against the database and updates only the
+root and the seats that actually changed, so one booking produces exactly two WAL events
+(airplane + seat) and the CDC stream stays free of no-op writes.
 
 ## CDC: Debezium → read models
 
@@ -175,9 +184,9 @@ CQRS/
     └── src/
         ├── database/database.module.ts    two TypeORM DataSources (WRITE_DB, READ_DB)
         ├── airplane/                      COMMAND SIDE
-        │   ├── domain/                    Airplane aggregate, Seat, domain errors (pure TS)
-        │   ├── application/               commands, handlers, repository port, unit of work
-        │   ├── infrastructure/            TypeORM entities + repository (FOR UPDATE)
+        │   ├── domain/                    Airplane aggregate + Seat (TypeORM entities with behaviour), domain errors
+        │   ├── application/               commands, handlers, unit of work (transaction + lock)
+        │   ├── infrastructure/            repository: FOR UPDATE load + save
         │   └── api/                       command controller + DTO validation
         ├── projection/                    CDC endpoint, read-model entities, projectors
         └── queries/                       QUERY SIDE: query handlers + controller
