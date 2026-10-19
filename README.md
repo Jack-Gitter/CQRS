@@ -1,4 +1,4 @@
-# CQRS demo: NestJS + TypeORM + two Postgres databases + Debezium CDC
+# CQRS demo: NestJS + TypeORM + two Postgres databases + Debezium CDC + Kafka
 
 A small airline seat-booking service that shows the classic CQRS split:
 
@@ -6,52 +6,71 @@ A small airline seat-booking service that shows the classic CQRS split:
   aggregate root that is loaded under a **pessimistic lock** (`SELECT ... FOR UPDATE`).
 * **Debezium Server** tails the write database's WAL (logical replication, `pgoutput`)
   and publishes every row change to **Kafka**, one topic per table.
-* A **kafkajs consumer** in the API reads those topics and runs **projectors** that build
-  **denormalized read models** in a second, physically separate *read* Postgres database.
-* **Query side** serves HTTP reads exclusively from the read database.
+* A separate **projector service** consumes those topics with kafkajs and runs **projectors**
+  that build **denormalized read models** in a second, physically separate *read* Postgres
+  database.
+* **Query side** (in the API) serves HTTP reads exclusively from the read database.
+
+Two NestJS apps in one monorepo: `apps/api` (commands + queries, knows nothing about Kafka)
+and `apps/projector` (headless Kafka consumer + projectors). `libs/shared` holds what both
+need: the read-model entities, the Debezium event shape and the cabin price table.
 
 ```
           commands                                   queries
    POST /airplanes/:id/seats/1A/book           GET /airplanes, GET /airplanes/:id ...
                  │                                           ▲
                  ▼                                           │
- ┌──────────────────────────── NestJS API (one process) ───────────────────────────┐
- │  CommandBus → handler → UnitOfWork                     QueryBus → query handlers │
- │     BEGIN; SELECT airplane FOR UPDATE;                     (TypeORM, READ_DB)    │
- │     airplane.bookSeat(); UPDATE seats; COMMIT                                    │
- │                                                                                  │
- │  CdcConsumer (kafkajs) → ProjectionService → airplane_summary / seat_map /       │
- │                                              booking_activity projectors         │
- └──────┬───────────────────────────────────────────▲───────────────────┬───────────┘
-        │ TypeORM (WRITE_DB)                        │ consume           │ TypeORM (READ_DB)
-        ▼                                           │                   ▼
- ┌─────────────┐   WAL (pgoutput)   ┌───────────────┴─┐          ┌─────────────┐
- │  write-db   │ ─────────────────▶ │ Debezium Server │          │   read-db   │
- │ airplanes   │ replication slot   │       │ produce │          │ airplane_   │
- │ seats       │                    └───────┼─────────┘          │  summary    │
- └─────────────┘                            ▼                    │ seat_map    │
-                                   ┌─────────────────┐           │ booking_    │
-                                   │      kafka      │           │  activity   │
-                                   │ airline.public. │           └─────────────┘
-                                   │   airplanes     │
-                                   │ airline.public. │
-                                   │   seats         │
-                                   └─────────────────┘
+ ┌──────────────────── apps/api (NestJS) ─────────────────────────┐
+ │  CommandBus → handler → UnitOfWork        QueryBus → handlers  │
+ │     BEGIN; SELECT airplane FOR UPDATE;      (TypeORM, READ_DB) │
+ │     airplane.bookSeat(); UPDATE seats; COMMIT                  │
+ └──────┬────────────────────────────────────────────────▲────────┘
+        │ TypeORM (WRITE_DB)                              │ read
+        ▼                                                 │
+ ┌─────────────┐  WAL (pgoutput)  ┌─────────────────┐     │
+ │  write-db   │ ───────────────▶ │ Debezium Server │     │
+ │ airplanes   │ replication slot │                 │     │
+ │ seats       │                  └────────┬────────┘     │
+ └─────────────┘                           │ produce      │
+                                           ▼              │
+                                  ┌─────────────────┐     │
+                                  │      kafka      │     │
+                                  │ airline.public. │     │
+                                  │   airplanes     │     │
+                                  │ airline.public. │     │
+                                  │   seats         │     │
+                                  └────────┬────────┘     │
+                                           │ consume      │
+                                           ▼              │
+ ┌──────────────── apps/projector (NestJS, headless) ─────┼────────┐
+ │  CdcConsumer (kafkajs, group airline-read-model-projector)      │
+ │     → ProjectionService → airplane_summary / seat_map /         │
+ │                           booking_activity projectors           │
+ └──────────────────────────────────┬──────────────────────────────┘
+                                    │ TypeORM (READ_DB)   ┌─────────────┐
+                                    └───────────────────▶ │   read-db   │
+                                                          │ airplane_   │
+                                                          │  summary    │
+                                                          │ seat_map    │
+                                                          │ booking_    │
+                                                          │  activity   │
+                                                          └─────────────┘
 ```
 
 ## Run it
 
 ```bash
 cd CQRS
-docker compose up --build        # write-db, read-db, kafka, api, debezium
+docker compose up --build        # write-db, read-db, kafka, debezium, api, projector
 ./scripts/demo.sh                # in a second terminal: full command/query walkthrough
-./scripts/outage-demo.sh         # projector outage: Kafka buffers, consumer catches up
+./scripts/outage-demo.sh         # stop the projector, keep booking, watch it catch up
 ```
 
 Watch the pipeline while the demo runs:
 
 ```bash
-docker compose logs -f api        # "[u] seat 1A BOOKED (Ada Lovelace) -> seat_map", lock messages, ...
+docker compose logs -f projector  # "[u] seat 1A BOOKED (Ada Lovelace) -> seat_map"
+docker compose logs -f api        # "airplane N320XY -> version 3"
 docker compose logs -f debezium   # snapshot + streaming progress
 
 # tail a topic from the host (kcat) or inside the container
@@ -61,7 +80,8 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
 
 | Service   | Port | Notes                                              |
 |-----------|------|----------------------------------------------------|
-| api       | 3000 | NestJS, commands + queries + Kafka consumer        |
+| api       | 3000 | NestJS, commands + queries                         |
+| projector | none | NestJS headless, Kafka consumer + projectors        |
 | write-db  | 5433 | `postgres://postgres:postgres@localhost:5433/airline_write` |
 | read-db   | 5434 | `postgres://postgres:postgres@localhost:5434/airline_read`  |
 | kafka     | 29092 | bootstrap server for host clients (`localhost:29092`) |
@@ -96,7 +116,7 @@ Query side (reads from the read DB only):
 
 ## The write model (DDD)
 
-`api/src/airplane/domain/`
+`apps/api/src/airplane/domain/`
 
 * `Airplane` is the aggregate root **and** the TypeORM entity for the `airplanes` table
   ("rich entity" style). `Seat` is an entity inside it, mapped to `seats`, and is never
@@ -156,9 +176,10 @@ root and the seats that actually changed, so one booking produces exactly two WA
 Both write tables use `REPLICA IDENTITY FULL` so update events carry the full `before`
 image; the activity projector uses it to detect `AVAILABLE → BOOKED` transitions.
 
-`CdcConsumer` (`api/src/projection/cdc.consumer.ts`) is a kafkajs consumer in group
-`airline-read-model-projector`. It subscribes to both topics and hands each message to
-`ProjectionService`, which applies the matching projectors in **one read-DB transaction**:
+`CdcConsumer` (`apps/projector/src/projection/cdc.consumer.ts`) is a kafkajs consumer in
+group `airline-read-model-projector`, running in its own process. It subscribes to both topics
+and hands each message to `ProjectionService`, which applies the matching projectors in
+**one read-DB transaction**:
 
 | Source topic               | Projector                  | Read model          | What it does                                                         |
 |----------------------------|----------------------------|---------------------|----------------------------------------------------------------------|
@@ -174,12 +195,12 @@ write side at all.
 
 ### What Kafka buys you
 
-Debezium does not care whether the projector is running. If the API is down, Debezium keeps
-publishing, the broker keeps the messages, and the consumer group's offset simply stops
-advancing. When the API comes back the consumer resumes from the last committed offset and
-catches up. `scripts/outage-demo.sh` shows exactly this: it stops the API, writes to the
-write DB with `psql`, prints the consumer-group lag, restarts the API and shows the read
-model updated.
+Debezium does not care whether the projector is running, and the API does not care either.
+If the projector is down, commands keep being accepted, Debezium keeps publishing, the broker
+keeps the messages, and the consumer group's offset simply stops advancing. When the projector
+comes back it resumes from the last committed offset and catches up. `scripts/outage-demo.sh`
+shows exactly this: it stops the projector, books a seat through the API, shows the stale
+read model and the consumer-group lag, restarts the projector and shows the read model updated.
 
 Other things the broker gives you that the direct HTTP sink did not: several independent
 consumer groups can build several read models from the same stream, a new read model can
@@ -207,29 +228,43 @@ Reads are **eventually consistent**. Commands return the new `version`; a client
 
 ```
 CQRS/
-├── docker-compose.yml
+├── docker-compose.yml                     write-db, read-db, kafka, debezium, api, projector
+├── Dockerfile                             builds either app: --build-arg APP=api|projector
+├── nest-cli.json, tsconfig.json           NestJS monorepo (webpack build, @app/shared path alias)
 ├── debezium/application.properties        Debezium Server: Postgres source → Kafka sink
 ├── db/write/001_schema.sql, 002_seed.sql  write DB schema (+ REPLICA IDENTITY FULL) and seed
 ├── db/read/001_schema.sql                 read model schema
 ├── scripts/demo.sh                        curl walkthrough
 ├── scripts/outage-demo.sh                 projector outage + catch-up via Kafka
-└── api/                                   NestJS + TypeORM
-    └── src/
-        ├── database/database.module.ts    two TypeORM DataSources (WRITE_DB, READ_DB)
-        ├── airplane/                      COMMAND SIDE
-        │   ├── domain/                    Airplane aggregate + Seat (TypeORM entities with behaviour), domain errors
-        │   ├── application/               commands, handlers, unit of work (transaction + lock)
-        │   ├── infrastructure/            repository: FOR UPDATE load + save
-        │   └── api/                       command controller + DTO validation
-        ├── projection/                    Kafka consumer, read-model entities, projectors
-        └── queries/                       QUERY SIDE: query handlers + controller
+├── apps/
+│   ├── api/src/                           COMMAND + QUERY API (HTTP, port 3000)
+│   │   ├── database/database.module.ts    TypeORM DataSources WRITE_DB + READ_DB
+│   │   ├── airplane/                      COMMAND SIDE
+│   │   │   ├── domain/                    Airplane aggregate + Seat (TypeORM entities with behaviour), domain errors
+│   │   │   ├── application/               commands, handlers, unit of work (transaction + lock)
+│   │   │   ├── infrastructure/            repository: FOR UPDATE load + save
+│   │   │   └── api/                       command controller + DTO validation
+│   │   └── queries/                       QUERY SIDE: query handlers + controller
+│   └── projector/src/                     PROJECTOR (headless, no HTTP)
+│       ├── projector.module.ts            TypeORM DataSource READ_DB only
+│       └── projection/                    CdcConsumer (kafkajs), ProjectionService, projectors
+└── libs/shared/src/                       shared by both apps
+    ├── read-models/                       airplane_summary / seat_map / booking_activity entities, READ_DB name
+    ├── cdc/debezium-event.ts              Debezium envelope + row types
+    └── pricing.ts                         cabin price multipliers
+```
+
+Local development without Docker for the apps (databases, Kafka and Debezium still from compose):
+
+```bash
+docker compose up write-db read-db kafka debezium
+npm install
+npm run start:api          # http://localhost:3000, uses localhost:5433 / 5434
+npm run start:projector    # consumes from localhost:29092, writes to localhost:5434
 ```
 
 ## Where to take it next
 
-* **Separate the projector process**: the consumer runs inside the API here for simplicity.
-  Running it as its own container from the same image lets you scale and deploy projectors
-  independently of the command/query API.
 * **Partition by aggregate**: route both tables into one topic partitioned by `airplane_id`
   (Debezium's `PartitionRouting` SMT) to get strict per-aggregate ordering and parallelism
   across aggregates.

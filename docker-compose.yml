@@ -4,7 +4,8 @@
 #   write-db  (Postgres, wal_level=logical)  <-- NestJS commands (TypeORM, pessimistic locks)
 #   debezium  (Debezium Server)              <-- tails write-db WAL via pgoutput, publishes to Kafka
 #   kafka     (Apache Kafka, KRaft)          <-- topics airline.public.airplanes / airline.public.seats
-#   api       (NestJS)  kafkajs consumer     <-- projects events into the read DB; also serves commands + queries
+#   projector (NestJS, headless)             <-- kafkajs consumer, projects events into the read DB
+#   api       (NestJS)                       <-- commands (write-db) + queries (read-db); knows nothing about Kafka
 #   read-db   (Postgres)                     <-- denormalized read models
 services:
   write-db:
@@ -83,14 +84,15 @@ services:
       start_period: 10s
 
   api:
-    build: ./api
+    build:
+      context: .
+      args:
+        APP: api
     container_name: cqrs-api
     environment:
       PORT: "3000"
       WRITE_DB_URL: postgres://postgres:postgres@write-db:5432/airline_write
       READ_DB_URL: postgres://postgres:postgres@read-db:5432/airline_read
-      KAFKA_BROKERS: kafka:9092
-      KAFKA_GROUP_ID: airline-read-model-projector
     ports:
       - "3000:3000"
     depends_on:
@@ -98,13 +100,29 @@ services:
         condition: service_healthy
       read-db:
         condition: service_healthy
-      kafka:
-        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 20
+
+  projector:
+    build:
+      context: .
+      args:
+        APP: projector
+    container_name: cqrs-projector
+    environment:
+      READ_DB_URL: postgres://postgres:postgres@read-db:5432/airline_read
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP_ID: airline-read-model-projector
+    depends_on:
+      read-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    # Deliberately NOT a dependency of anything: stop it and the API keeps serving;
+    # start it again and it catches up from Kafka (see scripts/outage-demo.sh).
 
   debezium:
     image: quay.io/debezium/server:3.1
