@@ -4,6 +4,7 @@
 #   write-db  (Postgres, wal_level=logical)  <-- NestJS commands (TypeORM, pessimistic locks)
 #   debezium  (Debezium Server)              <-- tails write-db WAL via pgoutput, publishes to Kafka
 #   kafka     (Apache Kafka, KRaft)          <-- topics airline.public.airplanes / airline.public.seats
+#   kafka-ui  (Kafbat UI)                    <-- browse topics, messages, consumer groups + lag at :8090
 #   projector (NestJS, headless)             <-- kafkajs consumer, projects events into the read DB
 #   api       (NestJS)                       <-- commands (write-db) + queries (read-db); knows nothing about Kafka
 #   read-db   (Postgres)                     <-- denormalized read models
@@ -82,6 +83,19 @@ services:
       timeout: 10s
       retries: 30
       start_period: 10s
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    container_name: cqrs-kafka-ui
+    environment:
+      KAFKA_CLUSTERS_0_NAME: cqrs
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports:
+      - "8090:8080" # http://localhost:8090
+    depends_on:
+      kafka:
+        condition: service_healthy
 
   api:
     build:

@@ -15,21 +15,40 @@
       "root": "apps/api",
       "entryFile": "main",
       "sourceRoot": "apps/api/src",
-      "compilerOptions": { "tsConfigPath": "apps/api/tsconfig.app.json" }
+      "compilerOptions": {
+        "tsConfigPath": "apps/api/tsconfig.app.json",
+        "plugins": [
+          {
+            "name": "@nestjs/swagger",
+            "options": {
+              "introspectComments": true,
+              "dtoFileNameSuffix": [
+                ".dto.ts",
+                ".entity.ts"
+              ],
+              "controllerFileNameSuffix": ".controller.ts"
+            }
+          }
+        ]
+      }
     },
     "projector": {
       "type": "application",
       "root": "apps/projector",
       "entryFile": "main",
       "sourceRoot": "apps/projector/src",
-      "compilerOptions": { "tsConfigPath": "apps/projector/tsconfig.app.json" }
+      "compilerOptions": {
+        "tsConfigPath": "apps/projector/tsconfig.app.json"
+      }
     },
     "shared": {
       "type": "library",
       "root": "libs/shared",
       "entryFile": "index",
       "sourceRoot": "libs/shared/src",
-      "compilerOptions": { "tsConfigPath": "libs/shared/tsconfig.lib.json" }
+      "compilerOptions": {
+        "tsConfigPath": "libs/shared/tsconfig.lib.json"
+      }
     }
   }
 }

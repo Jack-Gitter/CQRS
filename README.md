@@ -61,7 +61,9 @@ need: the read-model entities, the Debezium event shape and the cabin price tabl
 
 ```bash
 cd CQRS
-docker compose up --build        # write-db, read-db, kafka, debezium, api, projector
+docker compose up --build        # write-db, read-db, kafka, kafka-ui, debezium, api, projector
+open http://localhost:3000/docs   # Swagger UI: try every command and query from the browser
+open http://localhost:8090        # Kafka UI: watch CDC messages land on the topics
 ./scripts/demo.sh                # in a second terminal: full command/query walkthrough
 ./scripts/outage-demo.sh         # stop the projector, keep booking, watch it catch up
 ```
@@ -80,11 +82,12 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
 
 | Service   | Port | Notes                                              |
 |-----------|------|----------------------------------------------------|
-| api       | 3000 | NestJS, commands + queries                         |
+| api       | 3000 | NestJS, commands + queries. Swagger UI at `http://localhost:3000/docs` |
 | projector | none | NestJS headless, Kafka consumer + projectors        |
 | write-db  | 5433 | `postgres://postgres:postgres@localhost:5433/airline_write` |
 | read-db   | 5434 | `postgres://postgres:postgres@localhost:5434/airline_read`  |
 | kafka     | 29092 | bootstrap server for host clients (`localhost:29092`) |
+| kafka-ui  | 8090 | Kafbat UI: topics, messages, consumer groups and lag (`http://localhost:8090`) |
 | debezium  | 8089 | `http://localhost:8089/q/health`                   |
 
 The write DB is seeded with one airplane (`N737DM`, 36 seats, 1A pre-booked) so the
@@ -93,6 +96,8 @@ Debezium **initial snapshot** immediately populates the read models on first sta
 Reset everything (databases, Kafka topics, Debezium's WAL offset): `docker compose down -v`.
 
 ## HTTP API
+
+Everything below is also browsable and executable from Swagger UI at `http://localhost:3000/docs`.
 
 Command side (writes; returns only `{ airplaneId, version }`):
 
